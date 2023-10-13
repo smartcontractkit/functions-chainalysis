@@ -1,5 +1,5 @@
 {
-  "name": "chainlink-functions-compliance",
+  "name": "@chainlink-functions-compliance",
   "license": "MIT",
   "version": "0.1.0",
   "description": "Chainlink Functions Use Case: Chainalysis / Compliant On-Chain Finance",
