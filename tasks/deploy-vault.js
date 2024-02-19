@@ -1,10 +1,50 @@
-const { types } = require("hardhat/config")
-const { networks } = require("../../networks")
-const { addClientConsumerToSubscription } = require("../Functions-billing/add")
-const { getRequestConfig } = require("../../FunctionsSandboxLibrary")
-const { generateRequest } = require("./buildRequestJSON")
 const path = require("path")
 const process = require("process")
+const { networks } = require("../networks")
+const { SubscriptionManager, SecretsManager, createGist } = require("@chainlink/functions-toolkit")
+
+const generateEncryptedGist = async (secrets, githubApiToken, networkConfig) => {
+  const provider = new ethers.providers.JsonRpcProvider(networkConfig.url)
+  const signer = new ethers.Wallet(networkConfig.accounts[0], provider)
+
+  const secretsManager = new SecretsManager({
+    signer: signer,
+    functionsRouterAddress: networkConfig.functionsRouter,
+    donId: networkConfig.functionsDonId,
+  })
+  await secretsManager.initialize()
+
+  const encryptedSecretsObj = await secretsManager.encryptSecrets(secrets)
+
+  console.log(`Creating gist...`)
+  if (!githubApiToken) throw new Error("githubApiToken not provided - check your environment variables")
+
+  const gistURL = await createGist(githubApiToken, JSON.stringify(encryptedSecretsObj))
+  console.log(`Gist created ${gistURL}`)
+  const encryptedSecretsUrls = await secretsManager.encryptSecretsUrls([gistURL])
+
+  return encryptedSecretsUrls
+}
+
+const addConsumerToSubscription = async (subscriptionId, consumerAddress, networkConfig) => {
+  const provider = new ethers.providers.JsonRpcProvider(networkConfig.url)
+  const signer = new ethers.Wallet(networkConfig.accounts[0], provider)
+
+  const subscriptionManager = new SubscriptionManager({
+    signer,
+    linkTokenAddress: networkConfig.linkToken,
+    functionsRouterAddress: networkConfig.functionsRouter,
+  })
+  await subscriptionManager.initialize()
+
+  const addConsumerTxReceipt = await subscriptionManager.addConsumer({
+    subscriptionId,
+    consumerAddress,
+  })
+  console.log(`\nConsumer added to Functions subscription ${subscriptionId}`)
+
+  return addConsumerTxReceipt
+}
 
 task("functions-deploy-vault", "Deploys the CompliantVault contract")
   .addParam("subid", "Billing subscription ID used to pay for Functions requests")
@@ -43,25 +83,32 @@ task("functions-deploy-vault", "Deploys the CompliantVault contract")
     console.log("\n__Compiling Contracts__")
     await run("compile")
 
-    const unvalidatedRequestConfig = require(path.isAbsolute(taskArgs.configpath)
+    const networkConfig = networks[network.name]
+    const requestConfig = require(path.isAbsolute(taskArgs.configpath)
       ? taskArgs.configpath
       : path.join(process.cwd(), taskArgs.configpath))
-    const requestConfig = getRequestConfig(unvalidatedRequestConfig)
-    const request = await generateRequest(requestConfig, taskArgs)
+
+    const encryptedSecrets = await generateEncryptedGist(
+      requestConfig.secrets,
+      process.env.GITHUB_API_TOKEN,
+      networkConfig
+    )
+    const donIdBytes32 = ethers.utils.formatBytes32String(networkConfig.functionsDonId)
 
     const compliantVaultFactory = await ethers.getContractFactory("CompliantVault")
     const compliantVaultContract = await compliantVaultFactory.deploy(
-      networks[network.name]["functionsOracleProxy"],
+      networkConfig.functionsRouter,
+      donIdBytes32,
       taskArgs.subid,
       request.source,
-      request.secrets,
+      encryptedSecrets,
       taskArgs.gaslimit
     )
 
     console.log(`\nWaiting 1 block for transaction ${compliantVaultContract.deployTransaction.hash} to be confirmed...`)
     await compliantVaultContract.deployTransaction.wait(1)
 
-    await addClientConsumerToSubscription(taskArgs.subid, compliantVaultContract.address)
+    await addConsumerToSubscription(taskArgs.subid, compliantVaultContract.address, networkConfig)
 
     taskArgs.contract = compliantVaultContract.address
 
@@ -74,10 +121,11 @@ task("functions-deploy-vault", "Deploys the CompliantVault contract")
         await run("verify:verify", {
           address: compliantVaultContract.address,
           constructorArguments: [
-            networks[network.name]["functionsOracleProxy"],
+            networkConfig.functionsRouter,
+            donIdBytes32,
             taskArgs.subid,
             request.source,
-            request.secrets,
+            encryptedSecrets,
             taskArgs.gaslimit,
           ],
         })

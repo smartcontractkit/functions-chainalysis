@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.7;
 
-import {Functions, FunctionsClient} from "./dev/functions/FunctionsClient.sol";
-import {ConfirmedOwner} from "@chainlink/contracts/src/v0.8/ConfirmedOwner.sol";
+import {FunctionsClient} from "@chainlink/contracts/src/v0.8/functions/dev/v1_0_0/FunctionsClient.sol";
+import {FunctionsRequest} from "@chainlink/contracts/src/v0.8/functions/dev/v1_0_0/libraries/FunctionsRequest.sol";
+import {ConfirmedOwner} from "@chainlink/contracts/src/v0.8/shared/access/ConfirmedOwner.sol";
 import {Strings} from "@openzeppelin/contracts/utils/Strings.sol";
 
 /**
@@ -12,7 +13,7 @@ import {Strings} from "@openzeppelin/contracts/utils/Strings.sol";
  * @notice NOT FOR PRODUCTION USE
  */
 contract CompliantVault is FunctionsClient, ConfirmedOwner {
-  using Functions for Functions.Request;
+  using FunctionsRequest for FunctionsRequest.Request;
 
   string private constant DEPOSIT_ACTION_ID = "0";
   string private constant WITHDRAWAL_ACTION_ID = "1";
@@ -37,6 +38,7 @@ contract CompliantVault is FunctionsClient, ConfirmedOwner {
   bytes private s_secrets;
   uint64 private s_subscriptionId;
   uint32 private s_gasLimit;
+  bytes32 private s_donId;
 
   // EVENTS
 
@@ -61,6 +63,7 @@ contract CompliantVault is FunctionsClient, ConfirmedOwner {
    * @notice Executes once when a contract is created to initialize state variables
    *
    * @param oracle The FunctionsOracle contract
+   * @param donId The ID of the Chainlink oracle network
    * @param subscriptionId The ID of the Functions billing subscription
    * @param source JavaScript source code
    * @param secrets Encrypted secrets
@@ -68,11 +71,13 @@ contract CompliantVault is FunctionsClient, ConfirmedOwner {
    */
   constructor(
     address oracle,
+    bytes32 donId,
     uint64 subscriptionId,
     string memory source,
     bytes memory secrets,
     uint32 gasLimit
   ) FunctionsClient(oracle) ConfirmedOwner(msg.sender) {
+    s_donId = donId;
     s_subscriptionId = subscriptionId;
     s_source = source;
     s_secrets = secrets;
@@ -93,7 +98,7 @@ contract CompliantVault is FunctionsClient, ConfirmedOwner {
     string[] memory args = new string[](2);
     args[0] = DEPOSIT_ACTION_ID;
     args[1] = Strings.toHexString(msg.sender);
-    bytes32 requestId = executeRequest(s_source, s_secrets, args, s_subscriptionId, s_gasLimit);
+    bytes32 requestId = executeRequest(s_source, s_secrets, args, s_subscriptionId, s_gasLimit, s_donId);
 
     s_pending[requestId] = PendingRequest(msg.sender, msg.value, RequestType.Deposit);
     emit DepositRequest(requestId, msg.sender, msg.value);
@@ -115,7 +120,7 @@ contract CompliantVault is FunctionsClient, ConfirmedOwner {
     args[0] = WITHDRAWAL_ACTION_ID;
     args[1] = Strings.toHexString(msg.sender);
     args[2] = Strings.toString(amount);
-    bytes32 requestId = executeRequest(s_source, s_secrets, args, s_subscriptionId, s_gasLimit);
+    bytes32 requestId = executeRequest(s_source, s_secrets, args, s_subscriptionId, s_gasLimit, s_donId);
 
     s_pending[requestId] = PendingRequest(msg.sender, amount, RequestType.Withdrawal);
     emit WithdrawalRequest(requestId, msg.sender, amount);
@@ -166,15 +171,16 @@ contract CompliantVault is FunctionsClient, ConfirmedOwner {
     bytes memory secrets,
     string[] memory args,
     uint64 subscriptionId,
-    uint32 gasLimit
+    uint32 gasLimit,
+    bytes32 donId
   ) internal returns (bytes32 requestId) {
-    Functions.Request memory req;
-    req.initializeRequest(Functions.Location.Inline, Functions.CodeLanguage.JavaScript, source);
+    FunctionsRequest.Request memory req;
+    req.initializeRequest(FunctionsRequest.Location.Inline, FunctionsRequest.CodeLanguage.JavaScript, source);
     if (secrets.length > 0) {
-      req.addRemoteSecrets(secrets);
+      req.addSecretsReference(secrets);
     }
-    if (args.length > 0) req.addArgs(args);
-    requestId = sendRequest(req, subscriptionId, gasLimit);
+    if (args.length > 0) req.setArgs(args);
+    requestId = _sendRequest(req.encodeCBOR(), subscriptionId, gasLimit, donId);
   }
 
   /**
@@ -217,15 +223,6 @@ contract CompliantVault is FunctionsClient, ConfirmedOwner {
   }
 
   // OWNER
-
-  /**
-   * @notice Allows the Functions oracle address to be updated
-   *
-   * @param oracle New oracle address
-   */
-  function updateOracleAddress(address oracle) external onlyOwner {
-    setOracle(oracle);
-  }
 
   /**
    * @notice Allows the Functions billing subscription ID to be updated
