@@ -21,6 +21,10 @@ const config = {
   solidity: {
     compilers: [
       {
+        version: "0.8.19",
+        settings: SOLC_SETTINGS,
+      },
+      {
         version: "0.8.7",
         settings: SOLC_SETTINGS,
       },
